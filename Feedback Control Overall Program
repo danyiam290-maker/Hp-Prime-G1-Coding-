@@ -1,0 +1,1812 @@
+#pragma mode( separator(.,) integer(h32) )
+
+EXPORT TFTOOL()
+BEGIN
+  LOCAL num,den,npts,autof,sel;
+  LOCAL wmin,wmax,rng,res;
+
+  HComplex:=1;
+
+  num:={1};
+  den:={1,1};
+  npts:=200;
+  autof:=1;
+  wmin:=0.1;
+  wmax:=100;
+
+  REPEAT
+    sel:=0;
+    CHOOSE(sel,"TF ANALYSIS TOOL",
+      "Define Transfer Function",
+      "Routh Stability Table",
+      "Root Locus Data",
+      "Root Locus Chart",
+      "Bode Magnitude Plot",
+      "Bode Phase Plot",
+      "Complete Bode Plots",
+      "Polar Plot",
+      "Nyquist Criterion",
+      "System Information",
+      "Quit"
+    );
+
+    IF sel==0 OR sel==11 THEN
+      RETURN;
+    END;
+
+    IF sel==1 THEN
+      res:=TFINPUT(num,den);
+      IF res(1)==1 THEN
+        num:=res(2);
+        den:=res(3);
+        MSGBOX("Transfer function updated.");
+      END;
+    END;
+
+    IF sel==2 THEN
+      TFROUTH(den);
+    END;
+
+    IF sel==3 THEN
+      TFROOTDATA(num,den);
+    END;
+
+    IF sel==4 THEN
+      TFROOTLOCUS(num,den);
+    END;
+
+    IF sel==5 OR sel==6 OR sel==7 OR sel==8 THEN
+      IF INPUT(
+        {npts,autof},
+        "Plot Settings",
+        {"Number of points","Auto frequency range?"},
+        {"100 to 500 recommended","1=Auto, 0=Manual"}
+      ) THEN
+
+        IF autof==1 THEN
+          rng:=TFAUTORANGE(num,den);
+          wmin:=rng(1);
+          wmax:=rng(2);
+        ELSE
+          IF NOT INPUT(
+            {wmin,wmax},
+            "Manual Frequency Range",
+            {"wmin (rad/s)","wmax (rad/s)"},
+            {"Must be > 0","Must be > wmin"}
+          ) THEN
+            wmin:=0.1;
+            wmax:=100;
+          END;
+        END;
+
+        IF sel==5 THEN
+          TFMAG(num,den,wmin,wmax,npts);
+        END;
+
+        IF sel==6 THEN
+          TFPHASE(num,den,wmin,wmax,npts);
+        END;
+
+        IF sel==7 THEN
+          TFBODE(num,den,wmin,wmax,npts);
+        END;
+
+        IF sel==8 THEN
+          TFPOLAR(num,den,wmin,wmax,npts);
+        END;
+      END;
+    END;
+
+    IF sel==9 THEN
+      TFNYQUISTCRIT(num,den);
+    END;
+
+    IF sel==10 THEN
+      TFINFO(num,den);
+    END;
+
+  UNTIL 0;
+END;
+
+TFINPUT(oldnum,oldden)
+BEGIN
+  LOCAL method;
+
+  method:=0;
+  CHOOSE(method,"Input Method",
+    "Coefficient Lists",
+    "Zero / Pole / Gain",
+    "Factored Blocks",
+    "Cancel"
+  );
+
+  IF method==0 OR method==4 THEN
+    RETURN {0,oldnum,oldden};
+  END;
+
+  IF method==1 THEN
+    RETURN TFINPUT_COEFF(oldnum,oldden);
+  END;
+
+  IF method==2 THEN
+    RETURN TFINPUT_ZPK(oldnum,oldden);
+  END;
+
+  IF method==3 THEN
+    RETURN TFINPUT_FACTORS(oldnum,oldden);
+  END;
+
+  RETURN {0,oldnum,oldden};
+END;
+
+TFINPUT_COEFF(oldnum,oldden)
+BEGIN
+  LOCAL num,den;
+
+  num:=oldnum;
+  den:=oldden;
+
+  IF NOT INPUT(
+    {num,den},
+    "Coefficient Lists",
+    {"Numerator","Denominator"},
+    {"Example: {10,30}","Highest power first"}
+  ) THEN
+    RETURN {0,oldnum,oldden};
+  END;
+
+  IF SIZE(num)==0 OR SIZE(den)==0 THEN
+    MSGBOX("Invalid coefficient list.");
+    RETURN {0,oldnum,oldden};
+  END;
+
+  IF ABS(den(1))<1E-12 THEN
+    MSGBOX("Leading denominator coefficient cannot be zero.");
+    RETURN {0,oldnum,oldden};
+  END;
+
+  RETURN {1,num,den};
+END;
+
+TFINPUT_ZPK(oldnum,oldden)
+BEGIN
+  LOCAL gain,zeros,poles,num,den;
+
+  gain:=1;
+  zeros:={};
+  poles:={-1};
+
+  IF NOT INPUT(
+    {gain,zeros,poles},
+    "Zero / Pole / Gain",
+    {"Gain K","Zeros","Poles"},
+    {"Example: 10","Example: {-3}","Example: {0,-2,(-1+i),(-1-i)}"}
+  ) THEN
+    RETURN {0,oldnum,oldden};
+  END;
+
+  num:=TFBUILDNUM(gain,zeros);
+  den:=TFBUILDDEN(poles);
+
+  IF SIZE(den)==0 OR ABS(den(1))<1E-12 THEN
+    MSGBOX("Invalid pole list.");
+    RETURN {0,oldnum,oldden};
+  END;
+
+  RETURN {1,num,den};
+END;
+
+TFINPUT_FACTORS(oldnum,oldden)
+BEGIN
+  LOCAL gain,numroots,denroots;
+  LOCAL nint,qnumN,qdenN;
+  LOCAL num,den;
+  LOCAL idx,qa,qb,qc;
+
+  gain:=1;
+  numroots:={};
+  denroots:={};
+  nint:=0;
+  qnumN:=0;
+  qdenN:=0;
+
+  IF NOT INPUT(
+    {gain,numroots,denroots,nint,qnumN,qdenN},
+    "Factored Blocks",
+    {"Gain K","Num roots","Den roots","No. of s factors","Num quadratics","Den quadratics"},
+    {"For (s-r) terms","For (s-r) terms","Integrators","Count only","Count only"}
+  ) THEN
+    RETURN {0,oldnum,oldden};
+  END;
+
+  num:={gain};
+  den:={1};
+
+  FOR idx FROM 1 TO SIZE(numroots) DO
+    num:=TFPOLYMULT(num,{1,-numroots(idx)});
+  END;
+
+  FOR idx FROM 1 TO SIZE(denroots) DO
+    den:=TFPOLYMULT(den,{1,-denroots(idx)});
+  END;
+
+  FOR idx FROM 1 TO nint DO
+    den:=TFPOLYMULT(den,{1,0});
+  END;
+
+  FOR idx FROM 1 TO qnumN DO
+    qa:=1;
+    qb:=0;
+    qc:=0;
+    IF INPUT(
+      {qa,qb,qc},
+      "Numerator Quadratic "+STRING(idx),
+      {"a","b","c"},
+      {"a*s^2+b*s+c","",""}
+    ) THEN
+      num:=TFPOLYMULT(num,{qa,qb,qc});
+    ELSE
+      RETURN {0,oldnum,oldden};
+    END;
+  END;
+
+  FOR idx FROM 1 TO qdenN DO
+    qa:=1;
+    qb:=0;
+    qc:=0;
+    IF INPUT(
+      {qa,qb,qc},
+      "Denominator Quadratic "+STRING(idx),
+      {"a","b","c"},
+      {"a*s^2+b*s+c","",""}
+    ) THEN
+      den:=TFPOLYMULT(den,{qa,qb,qc});
+    ELSE
+      RETURN {0,oldnum,oldden};
+    END;
+  END;
+
+  IF ABS(den(1))<1E-12 THEN
+    MSGBOX("Invalid denominator.");
+    RETURN {0,oldnum,oldden};
+  END;
+
+  RETURN {1,num,den};
+END;
+
+TFBUILDNUM(gain,zeros)
+BEGIN
+  LOCAL p,idx;
+  p:={gain};
+  FOR idx FROM 1 TO SIZE(zeros) DO
+    p:=TFPOLYMULT(p,{1,-zeros(idx)});
+  END;
+  RETURN p;
+END;
+
+TFBUILDDEN(poles)
+BEGIN
+  LOCAL p,idx;
+  p:={1};
+  FOR idx FROM 1 TO SIZE(poles) DO
+    p:=TFPOLYMULT(p,{1,-poles(idx)});
+  END;
+  RETURN p;
+END;
+
+TFPOLYMULT(p1,p2)
+BEGIN
+  LOCAL n1,n2,res,r,c;
+  n1:=SIZE(p1);
+  n2:=SIZE(p2);
+  res:=MAKELIST(0,K,1,n1+n2-1);
+
+  FOR r FROM 1 TO n1 DO
+    FOR c FROM 1 TO n2 DO
+      res(r+c-1):=res(r+c-1)+p1(r)*p2(c);
+    END;
+  END;
+
+  RETURN res;
+END;
+
+TFPADLEFT(p,newlen)
+BEGIN
+  LOCAL diff,res,idx,n;
+  n:=SIZE(p);
+
+  IF n>=newlen THEN
+    RETURN p;
+  END;
+
+  diff:=newlen-n;
+  res:=MAKELIST(0,K,1,diff);
+
+  FOR idx FROM 1 TO n DO
+    res(SIZE(res)+1):=p(idx);
+  END;
+
+  RETURN res;
+END;
+
+TFSCALEPOLY(p,kval)
+BEGIN
+  LOCAL q,idx;
+  q:=p;
+  FOR idx FROM 1 TO SIZE(q) DO
+    q(idx):=kval*q(idx);
+  END;
+  RETURN q;
+END;
+
+TFPOLYADD(p1,p2)
+BEGIN
+  LOCAL n1,n2,n,res,idx;
+
+  n1:=SIZE(p1);
+  n2:=SIZE(p2);
+
+  IF n1>n2 THEN
+    n:=n1;
+  ELSE
+    n:=n2;
+  END;
+
+  p1:=TFPADLEFT(p1,n);
+  p2:=TFPADLEFT(p2,n);
+
+  res:=MAKELIST(0,K,1,n);
+  FOR idx FROM 1 TO n DO
+    res(idx):=p1(idx)+p2(idx);
+  END;
+  RETURN res;
+END;
+
+TFCLDEN(num,den,kval)
+BEGIN
+  RETURN TFPOLYADD(den,TFSCALEPOLY(num,kval));
+END;
+
+TFPOLYEVAL(c,z)
+BEGIN
+  LOCAL y,idx;
+  y:=c(1);
+  FOR idx FROM 2 TO SIZE(c) DO
+    y:=y*z+c(idx);
+  END;
+  RETURN y;
+END;
+
+TFROOTSNUM(poly)
+BEGIN
+  LOCAL c,n,idx,jdx,itn;
+  LOCAL rad,maxa;
+  LOCAL roots,newroots;
+  LOCAL zk,pz,denom;
+
+  HComplex:=1;
+
+  c:=TFNORM(poly);
+  n:=SIZE(c)-1;
+
+  IF n<=0 THEN
+    RETURN {};
+  END;
+
+  IF n==1 THEN
+    RETURN {-c(2)};
+  END;
+
+  maxa:=0;
+  FOR idx FROM 2 TO SIZE(c) DO
+    IF ABS(c(idx))>maxa THEN
+      maxa:=ABS(c(idx));
+    END;
+  END;
+
+  rad:=1+maxa;
+  roots:=MAKELIST(0,K,1,n);
+
+  FOR idx FROM 1 TO n DO
+    roots(idx):=rad*EXP(i*(2*3.14159265358979*(idx-1)/n+0.2));
+  END;
+
+  FOR itn FROM 1 TO 100 DO
+    newroots:=roots;
+
+    FOR idx FROM 1 TO n DO
+      zk:=roots(idx);
+      pz:=TFPOLYEVAL(c,zk);
+      denom:=1;
+
+      FOR jdx FROM 1 TO n DO
+        IF jdx<>idx THEN
+          denom:=denom*(zk-roots(jdx));
+        END;
+      END;
+
+      IF ABS(denom)<1E-12 THEN
+        denom:=denom+1E-12;
+      END;
+
+      newroots(idx):=zk-pz/denom;
+    END;
+
+    roots:=newroots;
+  END;
+
+  RETURN roots;
+END;
+
+TFPRINTROOTLIST(lst)
+BEGIN
+  LOCAL idx,rp,ip;
+
+  IF SIZE(lst)==0 THEN
+    PRINT("None");
+    RETURN;
+  END;
+
+  FOR idx FROM 1 TO SIZE(lst) DO
+    rp:=RE(lst(idx));
+    ip:=IM(lst(idx));
+
+    IF ABS(ip)<1E-6 THEN
+      PRINT(STRING(ROUND(rp,6)));
+    ELSE
+      IF ip>=0 THEN
+        PRINT(STRING(ROUND(rp,6))+" + j"+STRING(ROUND(ip,6)));
+      ELSE
+        PRINT(STRING(ROUND(rp,6))+" - j"+STRING(ROUND(-ip,6)));
+      END;
+    END;
+  END;
+END;
+
+TFADDLINE(lines,s)
+BEGIN
+  lines(SIZE(lines)+1):=s;
+  RETURN lines;
+END;
+
+TFAPPENDROOTS(lines,label,lst)
+BEGIN
+  LOCAL idx,rp,ip,s;
+
+  lines:=TFADDLINE(lines,label);
+
+  IF SIZE(lst)==0 THEN
+    lines:=TFADDLINE(lines,"  None");
+    RETURN lines;
+  END;
+
+  FOR idx FROM 1 TO SIZE(lst) DO
+    rp:=RE(lst(idx));
+    ip:=IM(lst(idx));
+
+    IF ABS(ip)<1E-6 THEN
+      s:="  "+STRING(ROUND(rp,6));
+    ELSE
+      IF ip>=0 THEN
+        s:="  "+STRING(ROUND(rp,6))+" + j"+STRING(ROUND(ip,6));
+      ELSE
+        s:="  "+STRING(ROUND(rp,6))+" - j"+STRING(ROUND(-ip,6));
+      END;
+    END;
+
+    lines:=TFADDLINE(lines,s);
+  END;
+
+  RETURN lines;
+END;
+
+TFAPPENDREALSEG(lines,num,den)
+BEGIN
+  LOCAL rp,rz,rs;
+  LOCAL idx,test,cnt;
+
+  lines:=TFADDLINE(lines,"Real-axis RL segments:");
+
+  rp:=TFGETREALROOTS(den);
+  rz:=TFGETREALROOTS(num);
+  rs:=TFMERGELISTS(rp,rz);
+  rs:=TFSORTLIST(rs);
+
+  IF SIZE(rs)==0 THEN
+    lines:=TFADDLINE(lines,"  None");
+    RETURN lines;
+  END;
+
+  test:=rs(1)-1;
+  cnt:=TFCOUNTGREATER(rs,test);
+  IF TFISODD(cnt)==1 THEN
+    lines:=TFADDLINE(lines,"  (-inf, "+STRING(ROUND(rs(1),6))+")");
+  END;
+
+  FOR idx FROM 1 TO SIZE(rs)-1 DO
+    IF ABS(rs(idx+1)-rs(idx))>1E-9 THEN
+      test:=(rs(idx)+rs(idx+1))/2;
+      cnt:=TFCOUNTGREATER(rs,test);
+      IF TFISODD(cnt)==1 THEN
+        lines:=TFADDLINE(lines,"  ("+STRING(ROUND(rs(idx),6))+", "+STRING(ROUND(rs(idx+1),6))+")");
+      END;
+    END;
+  END;
+
+  test:=rs(SIZE(rs))+1;
+  cnt:=TFCOUNTGREATER(rs,test);
+  IF TFISODD(cnt)==1 THEN
+    lines:=TFADDLINE(lines,"  ("+STRING(ROUND(rs(SIZE(rs)),6))+", +inf)");
+  END;
+
+  RETURN lines;
+END;
+
+TFSCROLLVIEW(title,lines)
+BEGIN
+  LOCAL top,per,total,key,idx,y,last;
+
+  total:=SIZE(lines);
+  IF total==0 THEN
+    lines:={"No data."};
+    total:=1;
+  END;
+
+  per:=11;
+  top:=1;
+
+  REPEAT
+    TFCLEAR();
+
+    TEXTOUT_P(title,5,2,2,RGB(0,0,0));
+    TEXTOUT_P("Up/Down scroll   Enter exit",55,222,1,RGB(0,0,180));
+
+    y:=20;
+    last:=top+per-1;
+    IF last>total THEN
+      last:=total;
+    END;
+
+    FOR idx FROM top TO last DO
+      TEXTOUT_P(lines(idx),5,y,1,RGB(0,0,0));
+      y:=y+18;
+    END;
+
+    FREEZE;
+
+    REPEAT
+      key:=GETKEY;
+    UNTIL key<>-1;
+
+    IF key==2 THEN
+      IF top>1 THEN
+        top:=top-1;
+      END;
+    END;
+
+    IF key==12 THEN
+      IF top+per-1<total THEN
+        top:=top+1;
+      END;
+    END;
+  UNTIL key==30;
+END;
+
+TFINFO(num,den)
+BEGIN
+  LOCAL ord,dcg,zeros,poles;
+  LOCAL lines;
+
+  lines:={};
+
+  lines:=TFADDLINE(lines,"Numerator: "+STRING(num));
+  lines:=TFADDLINE(lines,"Denominator: "+STRING(den));
+  lines:=TFADDLINE(lines,"");
+
+  ord:=SIZE(den)-1;
+  lines:=TFADDLINE(lines,"System order: "+STRING(ord));
+
+  IF ABS(den(SIZE(den)))>1E-12 THEN
+    dcg:=num(SIZE(num))/den(SIZE(den));
+    lines:=TFADDLINE(lines,"DC gain: "+STRING(ROUND(dcg,6)));
+  ELSE
+    lines:=TFADDLINE(lines,"DC gain: undefined");
+  END;
+
+  lines:=TFADDLINE(lines,"");
+
+  IF SIZE(num)>1 THEN
+    zeros:=TFROOTSNUM(num);
+  ELSE
+    zeros:={};
+  END;
+
+  IF SIZE(den)>1 THEN
+    poles:=TFROOTSNUM(den);
+  ELSE
+    poles:={};
+  END;
+
+  lines:=TFAPPENDROOTS(lines,"Zeros:",zeros);
+  lines:=TFADDLINE(lines,"");
+  lines:=TFAPPENDROOTS(lines,"Poles:",poles);
+  lines:=TFADDLINE(lines,"");
+  lines:=TFADDLINE(lines,"Use Routh table for stability check.");
+
+  TFSCROLLVIEW("TRANSFER FUNCTION INFO",lines);
+END;
+
+TFSUMROOTS(poly)
+BEGIN
+  IF SIZE(poly)<2 THEN
+    RETURN 0;
+  END;
+
+  IF ABS(poly(1))<1E-12 THEN
+    RETURN 0;
+  END;
+
+  RETURN -poly(2)/poly(1);
+END;
+
+TFISODD(n)
+BEGIN
+  RETURN n-2*IP(n/2);
+END;
+
+TFMERGELISTS(a,b)
+BEGIN
+  LOCAL r,idx;
+  r:=a;
+  FOR idx FROM 1 TO SIZE(b) DO
+    r(SIZE(r)+1):=b(idx);
+  END;
+  RETURN r;
+END;
+
+TFSORTLIST(lst)
+BEGIN
+  LOCAL i,j,tmp;
+  FOR i FROM 1 TO SIZE(lst)-1 DO
+    FOR j FROM i+1 TO SIZE(lst) DO
+      IF lst(j)<lst(i) THEN
+        tmp:=lst(i);
+        lst(i):=lst(j);
+        lst(j):=tmp;
+      END;
+    END;
+  END;
+  RETURN lst;
+END;
+
+TFGETREALROOTS(poly)
+BEGIN
+  LOCAL roots,rlist,idx;
+  LOCAL rp,ip;
+
+  rlist:={};
+
+  IF SIZE(poly)<=1 THEN
+    RETURN rlist;
+  END;
+
+  roots:=TFROOTSNUM(poly);
+
+  FOR idx FROM 1 TO SIZE(roots) DO
+    rp:=RE(roots(idx));
+    ip:=IM(roots(idx));
+
+    IF ABS(ip)<1E-6 THEN
+      rlist(SIZE(rlist)+1):=rp;
+    END;
+  END;
+
+  RETURN rlist;
+END;
+
+TFCOUNTGREATER(lst,xval)
+BEGIN
+  LOCAL cnt,idx;
+  cnt:=0;
+  FOR idx FROM 1 TO SIZE(lst) DO
+    IF lst(idx)>xval THEN
+      cnt:=cnt+1;
+    END;
+  END;
+  RETURN cnt;
+END;
+
+TFANGLESTR(na)
+BEGIN
+  LOCAL s,q,ang;
+  s:="";
+  FOR q FROM 0 TO na-1 DO
+    ang:=(2*q+1)*180/na;
+    s:=s+STRING(ROUND(ang,6));
+    IF q<na-1 THEN
+      s:=s+", ";
+    END;
+  END;
+  RETURN s;
+END;
+
+TFPRINTREALSEG(num,den)
+BEGIN
+  LOCAL rp,rz,rs;
+  LOCAL idx,test,cnt;
+
+  rp:=TFGETREALROOTS(den);
+  rz:=TFGETREALROOTS(num);
+  rs:=TFMERGELISTS(rp,rz);
+  rs:=TFSORTLIST(rs);
+
+  PRINT("Real-axis RL segments:");
+
+  IF SIZE(rs)==0 THEN
+    PRINT("None");
+    RETURN;
+  END;
+
+  test:=rs(1)-1;
+  cnt:=TFCOUNTGREATER(rs,test);
+  IF TFISODD(cnt)==1 THEN
+    PRINT("(-inf, "+STRING(ROUND(rs(1),6))+")");
+  END;
+
+  FOR idx FROM 1 TO SIZE(rs)-1 DO
+    IF ABS(rs(idx+1)-rs(idx))>1E-9 THEN
+      test:=(rs(idx)+rs(idx+1))/2;
+      cnt:=TFCOUNTGREATER(rs,test);
+      IF TFISODD(cnt)==1 THEN
+        PRINT("("+STRING(ROUND(rs(idx),6))+", "+STRING(ROUND(rs(idx+1),6))+")");
+      END;
+    END;
+  END;
+
+  test:=rs(SIZE(rs))+1;
+  cnt:=TFCOUNTGREATER(rs,test);
+  IF TFISODD(cnt)==1 THEN
+    PRINT("("+STRING(ROUND(rs(SIZE(rs)),6))+", +inf)");
+  END;
+END;
+
+TFROOTDATA(num,den)
+BEGIN
+  LOCAL poles,zeros;
+  LOCAL np,nz,na;
+  LOCAL sump,sumz,cent;
+  LOCAL lines;
+
+  IF SIZE(den)==0 THEN
+    MSGBOX("Bad denominator.");
+    RETURN;
+  END;
+
+  IF ABS(den(1))<1E-12 THEN
+    MSGBOX("Leading denominator coefficient cannot be zero.");
+    RETURN;
+  END;
+
+  poles:=TFROOTSNUM(den);
+  zeros:=TFROOTSNUM(num);
+
+  np:=SIZE(den)-1;
+  nz:=SIZE(num)-1;
+  na:=np-nz;
+
+  sump:=TFSUMROOTS(den);
+  sumz:=TFSUMROOTS(num);
+
+  lines:={};
+
+  lines:=TFAPPENDROOTS(lines,"Open-loop poles:",poles);
+  lines:=TFADDLINE(lines,"");
+  lines:=TFAPPENDROOTS(lines,"Open-loop zeros:",zeros);
+  lines:=TFADDLINE(lines,"");
+  lines:=TFADDLINE(lines,"Number of branches = "+STRING(np));
+  lines:=TFADDLINE(lines,"Number of finite zeros = "+STRING(nz));
+
+  IF na>0 THEN
+    cent:=(sump-sumz)/na;
+    lines:=TFADDLINE(lines,"Number of asymptotes = "+STRING(na));
+    lines:=TFADDLINE(lines,"Centroid = "+STRING(ROUND(cent,6)));
+    lines:=TFADDLINE(lines,"Asymptote angles (deg):");
+    lines:=TFADDLINE(lines,TFANGLESTR(na));
+  ELSE
+    lines:=TFADDLINE(lines,"Number of asymptotes = 0");
+    lines:=TFADDLINE(lines,"Centroid = none");
+    lines:=TFADDLINE(lines,"Asymptote angles = none");
+  END;
+
+  lines:=TFADDLINE(lines,"");
+  lines:=TFAPPENDREALSEG(lines,num,den);
+
+  TFSCROLLVIEW("ROOT LOCUS DATA",lines);
+END;
+
+TFLOG10(x)
+BEGIN
+  RETURN LN(x)/LN(10);
+END;
+
+TFNORM(c)
+BEGIN
+  LOCAL idx,n,leadv;
+  n:=SIZE(c);
+  IF n==0 THEN
+    RETURN c;
+  END;
+  leadv:=c(1);
+  IF ABS(leadv)<1E-12 THEN
+    RETURN c;
+  END;
+  FOR idx FROM 1 TO n DO
+    c(idx):=c(idx)/leadv;
+  END;
+  RETURN c;
+END;
+
+TFLOGSPACE(w1,w2,npts)
+BEGIN
+  LOCAL idx,l1,l2,w;
+  l1:=LN(w1);
+  l2:=LN(w2);
+  w:=MAKELIST(0,K,1,npts);
+
+  IF npts<=1 THEN
+    w(1):=w1;
+    RETURN w;
+  END;
+
+  FOR idx FROM 1 TO npts DO
+    w(idx):=EXP(l1+(idx-1)*(l2-l1)/(npts-1));
+  END;
+  RETURN w;
+END;
+
+TFEVAL(c,w)
+BEGIN
+  LOCAL z,y,idx;
+  z:=0+i*w;
+  y:=c(1);
+  FOR idx FROM 2 TO SIZE(c) DO
+    y:=y*z+c(idx);
+  END;
+  RETURN y;
+END;
+
+TFADDCANDS(c,lst)
+BEGIN
+  LOCAL idx,n,a,b,val,deg,scalev;
+  n:=SIZE(c);
+
+  FOR idx FROM 1 TO n-1 DO
+    a:=ABS(c(idx));
+    b:=ABS(c(idx+1));
+    IF a>1E-12 AND b>1E-12 THEN
+      val:=b/a;
+      IF val>1E-12 THEN
+        lst(SIZE(lst)+1):=val;
+      END;
+    END;
+  END;
+
+  deg:=n-1;
+  IF deg>=1 THEN
+    a:=ABS(c(1));
+    b:=ABS(c(n));
+    IF a>1E-12 AND b>1E-12 THEN
+      scalev:=b/a;
+      IF scalev>1E-12 THEN
+        scalev:=scalev^(1/deg);
+        IF scalev>1E-12 THEN
+          lst(SIZE(lst)+1):=scalev;
+        END;
+      END;
+    END;
+  END;
+
+  RETURN lst;
+END;
+
+TFBODEPART(roots)
+BEGIN
+  LOCAL tol,kf,n0,r1w,r1sg,r2wn,r2zt;
+  LOCAL idx,rv,re,imv,wn,zeta;
+
+  tol:=1E-5;
+  kf:=1;
+  n0:=0;
+  r1w:={};
+  r1sg:={};
+  r2wn:={};
+  r2zt:={};
+
+  FOR idx FROM 1 TO SIZE(roots) DO
+    rv:=roots(idx);
+    re:=RE(rv);
+    imv:=IM(rv);
+
+    IF ABS(imv)<tol THEN
+      IF ABS(re)<tol THEN
+        n0:=n0+1;
+      ELSE
+        kf:=kf*(-re);
+        r1w(SIZE(r1w)+1):=ABS(re);
+
+        IF re<0 THEN
+          r1sg(SIZE(r1sg)+1):=1;
+        ELSE
+          r1sg(SIZE(r1sg)+1):=-1;
+        END;
+      END;
+    ELSE
+      IF imv>tol THEN
+        wn:=SQRT(re*re+imv*imv);
+
+        IF wn<tol THEN
+          n0:=n0+2;
+        ELSE
+          zeta:=-re/wn;
+          kf:=kf*wn*wn;
+          r2wn(SIZE(r2wn)+1):=wn;
+          r2zt(SIZE(r2zt)+1):=zeta;
+        END;
+      END;
+    END;
+  END;
+
+  RETURN {kf,n0,r1w,r1sg,r2wn,r2zt};
+END;
+
+TFBODEMODEL(num,den)
+BEGIN
+  LOCAL npart,dpart,kg;
+
+  npart:=TFBODEPART(TFROOTSNUM(num));
+  dpart:=TFBODEPART(TFROOTSNUM(den));
+
+  kg:=num(1)*npart(1)/(den(1)*dpart(1));
+
+  RETURN {
+    kg,
+    npart(2),npart(3),npart(4),npart(5),npart(6),
+    dpart(2),dpart(3),dpart(4),dpart(5),dpart(6)
+  };
+END;
+
+TFBODEEVAL(model,w)
+BEGIN
+  LOCAL h,u,idx;
+  LOCAL kg;
+  LOCAL z0,z1w,z1sg,z2wn,z2zt;
+  LOCAL p0,p1w,p1sg,p2wn,p2zt;
+
+  kg:=model(1);
+
+  z0:=model(2);
+  z1w:=model(3);
+  z1sg:=model(4);
+  z2wn:=model(5);
+  z2zt:=model(6);
+
+  p0:=model(7);
+  p1w:=model(8);
+  p1sg:=model(9);
+  p2wn:=model(10);
+  p2zt:=model(11);
+
+  h:=kg;
+
+  IF z0>0 THEN
+    FOR idx FROM 1 TO z0 DO
+      h:=h*(i*w);
+    END;
+  END;
+
+  FOR idx FROM 1 TO SIZE(z1w) DO
+    u:=w/z1w(idx);
+    h:=h*(1+i*z1sg(idx)*u);
+  END;
+
+  FOR idx FROM 1 TO SIZE(z2wn) DO
+    u:=w/z2wn(idx);
+    h:=h*((1-u*u)+i*(2*z2zt(idx)*u));
+  END;
+
+  IF p0>0 THEN
+    FOR idx FROM 1 TO p0 DO
+      h:=h/(i*w);
+    END;
+  END;
+
+  FOR idx FROM 1 TO SIZE(p1w) DO
+    u:=w/p1w(idx);
+    h:=h/(1+i*p1sg(idx)*u);
+  END;
+
+  FOR idx FROM 1 TO SIZE(p2wn) DO
+    u:=w/p2wn(idx);
+    h:=h/((1-u*u)+i*(2*p2zt(idx)*u));
+  END;
+
+  RETURN h;
+END;
+
+TFARGDEG(z)
+BEGIN
+  LOCAL a;
+  a:=ARG(z);
+
+  IF HAngle==1 THEN
+    RETURN a*180/3.14159265358979;
+  END;
+
+  IF HAngle==2 THEN
+    RETURN a*0.9;
+  END;
+
+  RETURN a;
+END;
+
+TFBODEPHASE(model,w)
+BEGIN
+  LOCAL ph,u,idx;
+  LOCAL kg;
+  LOCAL z0,z1w,z1sg,z2wn,z2zt;
+  LOCAL p0,p1w,p1sg,p2wn,p2zt;
+
+  kg:=model(1);
+
+  z0:=model(2);
+  z1w:=model(3);
+  z1sg:=model(4);
+  z2wn:=model(5);
+  z2zt:=model(6);
+
+  p0:=model(7);
+  p1w:=model(8);
+  p1sg:=model(9);
+  p2wn:=model(10);
+  p2zt:=model(11);
+
+  ph:=0;
+
+  IF kg<0 THEN
+    ph:=ph+180;
+  END;
+
+  ph:=ph+90*z0;
+  ph:=ph-90*p0;
+
+  FOR idx FROM 1 TO SIZE(z1w) DO
+    u:=w/z1w(idx);
+    ph:=ph+TFARGDEG(1+i*z1sg(idx)*u);
+  END;
+
+  FOR idx FROM 1 TO SIZE(z2wn) DO
+    u:=w/z2wn(idx);
+    ph:=ph+TFARGDEG((1-u*u)+i*(2*z2zt(idx)*u));
+  END;
+
+  FOR idx FROM 1 TO SIZE(p1w) DO
+    u:=w/p1w(idx);
+    ph:=ph-TFARGDEG(1+i*p1sg(idx)*u);
+  END;
+
+  FOR idx FROM 1 TO SIZE(p2wn) DO
+    u:=w/p2wn(idx);
+    ph:=ph-TFARGDEG((1-u*u)+i*(2*p2zt(idx)*u));
+  END;
+
+  RETURN ph;
+END;
+
+TFWRAP180(a)
+BEGIN
+  WHILE a>180 DO
+    a:=a-360;
+  END;
+
+  WHILE a<=-180 DO
+    a:=a+360;
+  END;
+
+  RETURN a;
+END;
+
+TFNEARPHASE(a,ref)
+BEGIN
+  WHILE a-ref>180 DO
+    a:=a-360;
+  END;
+
+  WHILE a-ref<-180 DO
+    a:=a+360;
+  END;
+
+  RETURN a;
+END;
+
+TFAPPENDPOS(dst,src)
+BEGIN
+  LOCAL idx;
+  FOR idx FROM 1 TO SIZE(src) DO
+    IF src(idx)>1E-12 THEN
+      dst(SIZE(dst)+1):=src(idx);
+    END;
+  END;
+  RETURN dst;
+END;
+
+TFAUTORANGE(num,den)
+BEGIN
+  LOCAL model,cand,idx,minv,maxv,w1,w2;
+  LOCAL z1w,z2wn,p1w,p2wn;
+
+  model:=TFBODEMODEL(num,den);
+
+  z1w:=model(3);
+  z2wn:=model(5);
+  p1w:=model(8);
+  p2wn:=model(10);
+
+  cand:={};
+  cand:=TFAPPENDPOS(cand,z1w);
+  cand:=TFAPPENDPOS(cand,z2wn);
+  cand:=TFAPPENDPOS(cand,p1w);
+  cand:=TFAPPENDPOS(cand,p2wn);
+
+  IF SIZE(cand)==0 THEN
+    RETURN {0.1,100};
+  END;
+
+  minv:=cand(1);
+  maxv:=cand(1);
+
+  FOR idx FROM 2 TO SIZE(cand) DO
+    IF cand(idx)<minv THEN
+      minv:=cand(idx);
+    END;
+    IF cand(idx)>maxv THEN
+      maxv:=cand(idx);
+    END;
+  END;
+
+  w1:=10^(FLOOR(TFLOG10(minv))-1);
+  w2:=10^(CEILING(TFLOG10(maxv))+1);
+
+  IF w1<=0 THEN
+    w1:=0.1;
+  END;
+
+  IF w2<=w1 THEN
+    w2:=100*w1;
+  END;
+
+  RETURN {w1,w2};
+END;
+
+TFMAGDATA(num,den,w1,w2,npts)
+BEGIN
+  LOCAL model,w,m,idx,h;
+
+  model:=TFBODEMODEL(num,den);
+  w:=TFLOGSPACE(w1,w2,npts);
+  m:=MAKELIST(0,K,1,npts);
+
+  FOR idx FROM 1 TO npts DO
+    h:=TFBODEEVAL(model,w(idx));
+    m(idx):=20*TFLOG10(ABS(h));
+  END;
+
+  RETURN {w,m};
+END;
+
+TFPHASEDATA(num,den,w1,w2,npts)
+BEGIN
+  LOCAL model,w,p,idx,rawp;
+
+  model:=TFBODEMODEL(num,den);
+  w:=TFLOGSPACE(w1,w2,npts);
+  p:=MAKELIST(0,K,1,npts);
+
+  IF npts>=1 THEN
+    rawp:=TFBODEPHASE(model,w(1));
+    p(1):=TFWRAP180(rawp);
+  END;
+
+  FOR idx FROM 2 TO npts DO
+    rawp:=TFBODEPHASE(model,w(idx));
+    rawp:=TFWRAP180(rawp);
+    p(idx):=TFNEARPHASE(rawp,p(idx-1));
+  END;
+
+  RETURN {w,p};
+END;
+
+TFPOLARDATA(num,den,w1,w2,npts)
+BEGIN
+  LOCAL w,xv,yv,idx,h;
+
+  w:=TFLOGSPACE(w1,w2,npts);
+  xv:=MAKELIST(0,K,1,npts);
+  yv:=MAKELIST(0,K,1,npts);
+
+  FOR idx FROM 1 TO npts DO
+    h:=TFEVAL(num,w(idx))/TFEVAL(den,w(idx));
+    xv(idx):=RE(h);
+    yv(idx):=IM(h);
+  END;
+
+  RETURN {xv,yv};
+END;
+
+TFROUTHMAT(den)
+BEGIN
+  LOCAL d,nr,nc,mat;
+  LOCAL r,c,oddp,evenp;
+  LOCAL topv,botv,rtop,rbot;
+  LOCAL epsv,allzero,ordv,auxr;
+
+  epsv:=1E-9;
+  d:=TFNORM(den);
+  nr:=SIZE(d);
+  nc:=IP((nr+1)/2);
+  mat:=MAKEMAT(0,nr,nc);
+
+  oddp:=1;
+  FOR c FROM 1 TO nc DO
+    IF oddp<=SIZE(d) THEN
+      mat(1,c):=d(oddp);
+    END;
+    oddp:=oddp+2;
+  END;
+
+  IF nr>=2 THEN
+    evenp:=2;
+    FOR c FROM 1 TO nc DO
+      IF evenp<=SIZE(d) THEN
+        mat(2,c):=d(evenp);
+      END;
+      evenp:=evenp+2;
+    END;
+  END;
+
+  FOR r FROM 3 TO nr DO
+    IF ABS(mat(r-1,1))<epsv THEN
+      mat(r-1,1):=epsv;
+    END;
+
+    FOR c FROM 1 TO nc-1 DO
+      topv:=mat(r-1,1);
+      botv:=mat(r-2,1);
+      rtop:=mat(r-2,c+1);
+      rbot:=mat(r-1,c+1);
+      mat(r,c):=(topv*rtop-botv*rbot)/topv;
+    END;
+
+    allzero:=1;
+    FOR c FROM 1 TO nc DO
+      IF ABS(mat(r,c))>epsv THEN
+        allzero:=0;
+      END;
+    END;
+
+    IF allzero==1 THEN
+      ordv:=SIZE(d)-r+1;
+      auxr:=r-1;
+      FOR c FROM 1 TO nc-1 DO
+        mat(r,c):=(ordv-2*(c-1))*mat(auxr,c);
+      END;
+      mat(r,nc):=0;
+    END;
+  END;
+
+  RETURN mat;
+END;
+
+TFROUTH(den)
+BEGIN
+  LOCAL mat,nr,nc,r,c,deg,linev,rhp;
+  LOCAL lines;
+
+  IF SIZE(den)==0 THEN
+    MSGBOX("Bad denominator.");
+    RETURN;
+  END;
+
+  IF ABS(den(1))<1E-12 THEN
+    MSGBOX("Leading denominator coefficient cannot be zero.");
+    RETURN;
+  END;
+
+  mat:=TFROUTHMAT(den);
+  nr:=SIZE(den);
+  nc:=IP((nr+1)/2);
+  deg:=nr-1;
+
+  lines:={};
+  lines:=TFADDLINE(lines,"Denominator: "+STRING(den));
+  lines:=TFADDLINE(lines,"");
+
+  FOR r FROM 1 TO nr DO
+    linev:="s^"+STRING(deg-(r-1))+" : ";
+    FOR c FROM 1 TO nc DO
+      linev:=linev+STRING(ROUND(mat(r,c),6))+"   ";
+    END;
+    lines:=TFADDLINE(lines,linev);
+  END;
+
+  rhp:=0;
+  FOR r FROM 1 TO nr-1 DO
+    IF mat(r,1)*mat(r+1,1)<0 THEN
+      rhp:=rhp+1;
+    END;
+  END;
+
+  lines:=TFADDLINE(lines,"");
+
+  IF rhp==0 THEN
+    lines:=TFADDLINE(lines,"SYSTEM IS STABLE");
+    lines:=TFADDLINE(lines,"RHP poles = 0");
+  ELSE
+    lines:=TFADDLINE(lines,"SYSTEM IS UNSTABLE");
+    lines:=TFADDLINE(lines,"RHP poles = "+STRING(rhp));
+  END;
+
+  TFSCROLLVIEW("ROUTH-HURWITZ TABLE",lines);
+END;
+
+TFROOTLOCUS(num,den)
+BEGIN
+  LOCAL kmax,nk;
+  LOCAL xp,yp,poles,zeros;
+  LOCAL idx,jdx,kval,clden,roots;
+  LOCAL pr,pi;
+
+  kmax:=100;
+  nk:=80;
+
+  IF NOT INPUT(
+    {kmax,nk},
+    "Root Locus Settings",
+    {"K max","K samples"},
+    {"Unity negative feedback","40 to 200 is good"}
+  ) THEN
+    RETURN;
+  END;
+
+  IF kmax<=0 THEN
+    kmax:=100;
+  END;
+
+  IF nk<2 THEN
+    nk:=2;
+  END;
+
+  xp:={};
+  yp:={};
+
+  FOR idx FROM 1 TO nk DO
+    kval:=kmax*(idx-1)/(nk-1);
+    clden:=TFCLDEN(num,den,kval);
+    roots:=TFROOTSNUM(clden);
+
+    FOR jdx FROM 1 TO SIZE(roots) DO
+      pr:=RE(roots(jdx));
+      pi:=IM(roots(jdx));
+      xp(SIZE(xp)+1):=pr;
+      yp(SIZE(yp)+1):=pi;
+    END;
+  END;
+
+  poles:=TFROOTSNUM(den);
+  zeros:=TFROOTSNUM(num);
+
+  TFDRAWROOTLOCUS(xp,yp,poles,zeros,kmax);
+END;
+
+TFCLEAR()
+BEGIN
+  RECT_P(0,0,319,239,RGB(255,255,255),RGB(255,255,255));
+END;
+
+TFDRAWPLOT(xv,yv,ttl,xlab,ylab)
+BEGIN
+  LOCAL n,idx;
+  LOCAL xmin,xmax,ymin,ymax;
+  LOCAL x1,x2,y1,y2,px1,px2,py1,py2;
+
+  n:=SIZE(xv);
+  xmin:=xv(1);
+  xmax:=xv(1);
+  ymin:=yv(1);
+  ymax:=yv(1);
+
+  FOR idx FROM 2 TO n DO
+    IF xv(idx)<xmin THEN xmin:=xv(idx); END;
+    IF xv(idx)>xmax THEN xmax:=xv(idx); END;
+    IF yv(idx)<ymin THEN ymin:=yv(idx); END;
+    IF yv(idx)>ymax THEN ymax:=yv(idx); END;
+  END;
+
+  IF ABS(xmax-xmin)<1E-12 THEN
+    xmax:=xmin+1;
+  END;
+
+  IF ABS(ymax-ymin)<1E-12 THEN
+    ymax:=ymax+1;
+    ymin:=ymin-1;
+  END;
+
+  TFCLEAR();
+
+  LINE_P(30,20,30,210,RGB(0,0,0));
+  LINE_P(30,210,310,210,RGB(0,0,0));
+
+  TEXTOUT_P(ttl,70,2,3,RGB(0,0,0));
+  TEXTOUT_P(xlab,180,220,2,RGB(0,0,0));
+  TEXTOUT_P(ylab,5,5,2,RGB(0,0,0));
+
+  TEXTOUT_P(STRING(ROUND(xmin,3)),15,214,1,RGB(0,0,0));
+  TEXTOUT_P(STRING(ROUND(xmax,3)),260,214,1,RGB(0,0,0));
+  TEXTOUT_P(STRING(ROUND(ymax,3)),2,20,1,RGB(0,0,0));
+  TEXTOUT_P(STRING(ROUND(ymin,3)),2,200,1,RGB(0,0,0));
+
+  FOR idx FROM 1 TO 4 DO
+    LINE_P(30,210-IP(idx*190/4),310,210-IP(idx*190/4),RGB(220,220,220));
+    LINE_P(30+IP(idx*280/4),20,30+IP(idx*280/4),210,RGB(220,220,220));
+  END;
+
+  FOR idx FROM 1 TO n-1 DO
+    x1:=xv(idx);
+    x2:=xv(idx+1);
+    y1:=yv(idx);
+    y2:=yv(idx+1);
+
+    px1:=30+IP(280*(x1-xmin)/(xmax-xmin));
+    px2:=30+IP(280*(x2-xmin)/(xmax-xmin));
+    py1:=210-IP(190*(y1-ymin)/(ymax-ymin));
+    py2:=210-IP(190*(y2-ymin)/(ymax-ymin));
+
+    LINE_P(px1,py1,px2,py2,RGB(0,0,255));
+  END;
+
+  FREEZE;
+  WAIT(0);
+END;
+
+TFDRAWCOMPLEX(xv,yv,ttl)
+BEGIN
+  LOCAL n,idx;
+  LOCAL xmin,xmax,ymin,ymax;
+  LOCAL x1,x2,y1,y2,px1,px2,py1,py2;
+  LOCAL margx,margy,x0,y0;
+
+  n:=SIZE(xv);
+  IF n==0 THEN
+    MSGBOX("No plot data.");
+    RETURN;
+  END;
+
+  xmin:=xv(1);
+  xmax:=xv(1);
+  ymin:=yv(1);
+  ymax:=yv(1);
+
+  FOR idx FROM 2 TO n DO
+    IF xv(idx)<xmin THEN xmin:=xv(idx); END;
+    IF xv(idx)>xmax THEN xmax:=xv(idx); END;
+    IF yv(idx)<ymin THEN ymin:=yv(idx); END;
+    IF yv(idx)>ymax THEN ymax:=yv(idx); END;
+  END;
+
+  IF ABS(xmax-xmin)<1E-9 THEN
+    xmax:=xmax+1;
+    xmin:=xmin-1;
+  END;
+
+  IF ABS(ymax-ymin)<1E-9 THEN
+    ymax:=ymax+1;
+    ymin:=ymin-1;
+  END;
+
+  margx:=0.1*(xmax-xmin);
+  margy:=0.1*(ymax-ymin);
+
+  xmin:=xmin-margx;
+  xmax:=xmax+margx;
+  ymin:=ymin-margy;
+  ymax:=ymax+margy;
+
+  TFCLEAR();
+
+  TEXTOUT_P(ttl,95,2,3,RGB(0,0,0));
+  TEXTOUT_P("Re",285,220,2,RGB(0,0,0));
+  TEXTOUT_P("Im",5,5,2,RGB(0,0,0));
+
+  LINE_P(30,20,30,210,RGB(180,180,180));
+  LINE_P(30,210,310,210,RGB(180,180,180));
+  LINE_P(310,20,310,210,RGB(180,180,180));
+  LINE_P(30,20,310,20,RGB(180,180,180));
+
+  IF xmin<=0 AND xmax>=0 THEN
+    x0:=30+IP(280*(0-xmin)/(xmax-xmin));
+    LINE_P(x0,20,x0,210,RGB(0,0,0));
+  END;
+
+  IF ymin<=0 AND ymax>=0 THEN
+    y0:=210-IP(190*(0-ymin)/(ymax-ymin));
+    LINE_P(30,y0,310,y0,RGB(0,0,0));
+  END;
+
+  TEXTOUT_P(STRING(ROUND(xmin,3)),10,214,1,RGB(0,0,0));
+  TEXTOUT_P(STRING(ROUND(xmax,3)),255,214,1,RGB(0,0,0));
+  TEXTOUT_P(STRING(ROUND(ymax,3)),2,20,1,RGB(0,0,0));
+  TEXTOUT_P(STRING(ROUND(ymin,3)),2,200,1,RGB(0,0,0));
+
+  FOR idx FROM 1 TO n-1 DO
+    x1:=xv(idx);
+    x2:=xv(idx+1);
+    y1:=yv(idx);
+    y2:=yv(idx+1);
+
+    px1:=30+IP(280*(x1-xmin)/(xmax-xmin));
+    px2:=30+IP(280*(x2-xmin)/(xmax-xmin));
+    py1:=210-IP(190*(y1-ymin)/(ymax-ymin));
+    py2:=210-IP(190*(y2-ymin)/(ymax-ymin));
+
+    LINE_P(px1,py1,px2,py2,RGB(0,0,255));
+  END;
+
+  IF xmin<=-1 AND xmax>=-1 AND ymin<=0 AND ymax>=0 THEN
+    px1:=30+IP(280*(-1-xmin)/(xmax-xmin));
+    py1:=210-IP(190*(0-ymin)/(ymax-ymin));
+    LINE_P(px1-3,py1,px1+3,py1,RGB(255,0,0));
+    LINE_P(px1,py1-3,px1,py1+3,RGB(255,0,0));
+    TEXTOUT_P("-1",px1+4,py1+2,1,RGB(255,0,0));
+  END;
+
+  px1:=30+IP(280*(xv(1)-xmin)/(xmax-xmin));
+  py1:=210-IP(190*(yv(1)-ymin)/(ymax-ymin));
+  LINE_P(px1-2,py1-2,px1+2,py1+2,RGB(255,0,0));
+  LINE_P(px1-2,py1+2,px1+2,py1-2,RGB(255,0,0));
+
+  px1:=30+IP(280*(xv(n)-xmin)/(xmax-xmin));
+  py1:=210-IP(190*(yv(n)-ymin)/(ymax-ymin));
+  TEXTOUT_P("end",px1+3,py1-3,1,RGB(0,120,0));
+
+  FREEZE;
+  WAIT(0);
+END;
+
+TFDRAWROOTLOCUS(xp,yp,poles,zeros,kmax)
+BEGIN
+  LOCAL n,idx;
+  LOCAL xmin,xmax,ymin,ymax;
+  LOCAL xcur,ycur,px,py;
+  LOCAL zx,zy;
+  LOCAL margx,margy;
+  LOCAL x0,y0;
+
+  n:=SIZE(xp);
+  IF n==0 THEN
+    MSGBOX("No root locus data.");
+    RETURN;
+  END;
+
+  xmin:=xp(1);
+  xmax:=xp(1);
+  ymin:=yp(1);
+  ymax:=yp(1);
+
+  FOR idx FROM 2 TO n DO
+    IF xp(idx)<xmin THEN xmin:=xp(idx); END;
+    IF xp(idx)>xmax THEN xmax:=xp(idx); END;
+    IF yp(idx)<ymin THEN ymin:=yp(idx); END;
+    IF yp(idx)>ymax THEN ymax:=yp(idx); END;
+  END;
+
+  FOR idx FROM 1 TO SIZE(poles) DO
+    xcur:=RE(poles(idx));
+    ycur:=IM(poles(idx));
+    IF xcur<xmin THEN xmin:=xcur; END;
+    IF xcur>xmax THEN xmax:=xcur; END;
+    IF ycur<ymin THEN ymin:=ycur; END;
+    IF ycur>ymax THEN ymax:=ycur; END;
+  END;
+
+  FOR idx FROM 1 TO SIZE(zeros) DO
+    xcur:=RE(zeros(idx));
+    ycur:=IM(zeros(idx));
+    IF xcur<xmin THEN xmin:=xcur; END;
+    IF xcur>xmax THEN xmax:=xcur; END;
+    IF ycur<ymin THEN ymin:=ycur; END;
+    IF ycur>ymax THEN ymax:=ycur; END;
+  END;
+
+  IF ABS(xmax-xmin)<1E-9 THEN
+    xmax:=xmax+1;
+    xmin:=xmin-1;
+  END;
+
+  IF ABS(ymax-ymin)<1E-9 THEN
+    ymax:=ymax+1;
+    ymin:=ymin-1;
+  END;
+
+  margx:=0.1*(xmax-xmin);
+  margy:=0.1*(ymax-ymin);
+
+  xmin:=xmin-margx;
+  xmax:=xmax+margx;
+  ymin:=ymin-margy;
+  ymax:=ymax+margy;
+
+  TFCLEAR();
+
+  TEXTOUT_P("Root Locus",100,2,3,RGB(0,0,0));
+  TEXTOUT_P("K from 0 to "+STRING(ROUND(kmax,3)),80,220,2,RGB(0,0,0));
+
+  IF xmin<=0 AND xmax>=0 THEN
+    x0:=30+IP(280*(0-xmin)/(xmax-xmin));
+    LINE_P(x0,20,x0,210,RGB(0,0,0));
+  END;
+
+  IF ymin<=0 AND ymax>=0 THEN
+    y0:=210-IP(190*(0-ymin)/(ymax-ymin));
+    LINE_P(30,y0,310,y0,RGB(0,0,0));
+  END;
+
+  LINE_P(30,20,30,210,RGB(180,180,180));
+  LINE_P(30,210,310,210,RGB(180,180,180));
+  LINE_P(310,20,310,210,RGB(180,180,180));
+  LINE_P(30,20,310,20,RGB(180,180,180));
+
+  TEXTOUT_P(STRING(ROUND(xmin,3)),10,214,1,RGB(0,0,0));
+  TEXTOUT_P(STRING(ROUND(xmax,3)),255,214,1,RGB(0,0,0));
+  TEXTOUT_P(STRING(ROUND(ymax,3)),2,20,1,RGB(0,0,0));
+  TEXTOUT_P(STRING(ROUND(ymin,3)),2,200,1,RGB(0,0,0));
+
+  FOR idx FROM 1 TO n DO
+    px:=30+IP(280*(xp(idx)-xmin)/(xmax-xmin));
+    py:=210-IP(190*(yp(idx)-ymin)/(ymax-ymin));
+    LINE_P(px,py,px,py,RGB(0,0,255));
+  END;
+
+  FOR idx FROM 1 TO SIZE(poles) DO
+    zx:=30+IP(280*(RE(poles(idx))-xmin)/(xmax-xmin));
+    zy:=210-IP(190*(IM(poles(idx))-ymin)/(ymax-ymin));
+    LINE_P(zx-3,zy-3,zx+3,zy+3,RGB(255,0,0));
+    LINE_P(zx-3,zy+3,zx+3,zy-3,RGB(255,0,0));
+  END;
+
+  FOR idx FROM 1 TO SIZE(zeros) DO
+    zx:=30+IP(280*(RE(zeros(idx))-xmin)/(xmax-xmin));
+    zy:=210-IP(190*(IM(zeros(idx))-ymin)/(ymax-ymin));
+    TEXTOUT_P("o",zx-3,zy-5,2,RGB(0,150,0));
+  END;
+
+  FREEZE;
+  WAIT(0);
+END;
+
+TFMAG(num,den,w1,w2,npts)
+BEGIN
+  LOCAL dataw,w,m,x,idx;
+
+  IF w1<=0 OR w2<=w1 THEN
+    MSGBOX("Need 0 < wmin < wmax");
+    RETURN;
+  END;
+
+  IF npts<20 THEN
+    npts:=20;
+  END;
+
+  dataw:=TFMAGDATA(num,den,w1,w2,npts);
+  w:=dataw(1);
+  m:=dataw(2);
+
+  x:=MAKELIST(0,K,1,SIZE(w));
+  FOR idx FROM 1 TO SIZE(w) DO
+    x(idx):=TFLOG10(w(idx));
+  END;
+
+  TFDRAWPLOT(x,m,"Bode Magnitude","log10(w) [rad/s]","Magnitude [dB]");
+END;
+
+TFPHASE(num,den,w1,w2,npts)
+BEGIN
+  LOCAL dataw,w,p,x,idx;
+
+  IF w1<=0 OR w2<=w1 THEN
+    MSGBOX("Need 0 < wmin < wmax");
+    RETURN;
+  END;
+
+  IF npts<20 THEN
+    npts:=20;
+  END;
+
+  dataw:=TFPHASEDATA(num,den,w1,w2,npts);
+  w:=dataw(1);
+  p:=dataw(2);
+
+  x:=MAKELIST(0,K,1,SIZE(w));
+  FOR idx FROM 1 TO SIZE(w) DO
+    x(idx):=TFLOG10(w(idx));
+  END;
+
+  TFDRAWPLOT(x,p,"Bode Phase","log10(w) [rad/s]","Phase [deg]");
+END;
+
+TFBODE(num,den,w1,w2,npts)
+BEGIN
+  TFMAG(num,den,w1,w2,npts);
+  TFPHASE(num,den,w1,w2,npts);
+END;
+
+TFPOLAR(num,den,w1,w2,npts)
+BEGIN
+  LOCAL dataxy,xv,yv;
+
+  IF w1<=0 OR w2<=w1 THEN
+    MSGBOX("Need 0 < wmin < wmax");
+    RETURN;
+  END;
+
+  IF npts<20 THEN
+    npts:=20;
+  END;
+
+  dataxy:=TFPOLARDATA(num,den,w1,w2,npts);
+  xv:=dataxy(1);
+  yv:=dataxy(2);
+
+  TFDRAWCOMPLEX(xv,yv,"Polar Plot");
+END;
+
+TFNYQUISTCRIT(num,den)
+BEGIN
+  LOCAL poles,idx;
+  LOCAL rp;
+  LOCAL P,jwflag;
+  LOCAL lines;
+
+  P:=0;
+  jwflag:=0;
+  poles:=TFROOTSNUM(den);
+
+  FOR idx FROM 1 TO SIZE(poles) DO
+    rp:=RE(poles(idx));
+
+    IF rp>1E-6 THEN
+      P:=P+1;
+    END;
+
+    IF ABS(rp)<=1E-6 THEN
+      jwflag:=1;
+    END;
+  END;
+
+  lines:={};
+  lines:=TFADDLINE(lines,"Open-loop RHP poles P = "+STRING(P));
+  lines:=TFADDLINE(lines,"");
+  lines:=TFADDLINE(lines,"Let N = clockwise encirclements");
+  lines:=TFADDLINE(lines,"of the point (-1,0).");
+  lines:=TFADDLINE(lines,"");
+  lines:=TFADDLINE(lines,"Then Z = N + P");
+  lines:=TFADDLINE(lines,"where Z = closed-loop RHP poles.");
+  lines:=TFADDLINE(lines,"");
+  lines:=TFADDLINE(lines,"Closed-loop stable if Z = 0.");
+
+  IF jwflag==1 THEN
+    lines:=TFADDLINE(lines,"");
+    lines:=TFADDLINE(lines,"Warning: pole on imaginary axis.");
+    lines:=TFADDLINE(lines,"Nyquist contour needs care.");
+  END;
+
+  TFSCROLLVIEW("NYQUIST CRITERION",lines);
+END;
