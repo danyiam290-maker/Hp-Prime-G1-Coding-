@@ -1,0 +1,572 @@
+#pragma mode( separator(.,) )
+
+// ========================================
+// 4-BAR LINKAGE SOLVER (HP Prime G1-friendly)
+// - Position
+// - Velocity
+// - Acceleration
+// - Safe optional Newton refinement
+// - Angles displayed in 0 to 360 degrees
+// - User-friendly link names
+// ========================================
+
+
+// -------- Angle-mode safe trig wrappers --------
+// Assumed HP Prime mapping:
+// HAngle = 0 -> RAD
+// HAngle = 1 -> DEG
+// HAngle = 2 -> GRAD
+
+COSR(t)
+BEGIN
+  IF HAngle==1 THEN RETURN COS(t*180/π); END;
+  IF HAngle==2 THEN RETURN COS(t*200/π); END;
+  RETURN COS(t);
+END;
+
+SINR(t)
+BEGIN
+  IF HAngle==1 THEN RETURN SIN(t*180/π); END;
+  IF HAngle==2 THEN RETURN SIN(t*200/π); END;
+  RETURN SIN(t);
+END;
+
+ATANR(u)
+BEGIN
+  LOCAL a;
+  a := ATAN(u);
+  IF HAngle==1 THEN RETURN a*π/180; END;
+  IF HAngle==2 THEN RETURN a*π/200; END;
+  RETURN a;
+END;
+
+
+// -------- G1-safe ATAN2 (returns radians) --------
+ATAN2G1R(y,x)
+BEGIN
+  LOCAL a;
+
+  IF x==0 THEN
+    IF y>0 THEN RETURN π/2; END;
+    IF y<0 THEN RETURN -π/2; END;
+    RETURN 0;
+  END;
+
+  a := ATANR(y/x);
+
+  IF x<0 THEN
+    IF y>=0 THEN
+      a := a + π;
+    ELSE
+      a := a - π;
+    END;
+  END;
+
+  RETURN a;
+END;
+
+
+// -------- Wrap radians to (-π, π] --------
+WRAP2PI(t)
+BEGIN
+  WHILE t<=-π DO
+    t := t + 2*π;
+  END;
+
+  WHILE t>π DO
+    t := t - 2*π;
+  END;
+
+  RETURN t;
+END;
+
+
+// -------- Wrap degrees to [0,360) --------
+WRAPDEG(a)
+BEGIN
+  WHILE a<0 DO
+    a := a + 360;
+  END;
+
+  WHILE a>=360 DO
+    a := a - 360;
+  END;
+
+  RETURN a;
+END;
+
+
+// -------- Geometry solve (circle intersection) --------
+// Returns:
+// {{th3_1,th4_1,C1x,C1y},{th3_2,th4_2,C2x,C2y}}
+// or {} if no real assembly
+FOURBAR_GEOM(r1,r2,r3,r4,th2)
+BEGIN
+  LOCAL Dx,Dy,Bx,By;
+  LOCAL dx,dy,d;
+  LOCAL aa,h2,h;
+  LOCAL Px,Py;
+  LOCAL ux,uy;
+  LOCAL C1x,C1y,C2x,C2y;
+  LOCAL th3_1,th4_1,th3_2,th4_2;
+
+  Dx := r1;
+  Dy := 0;
+
+  Bx := r2*COSR(th2);
+  By := r2*SINR(th2);
+
+  dx := Dx - Bx;
+  dy := Dy - By;
+  d  := SQRT(dx^2 + dy^2);
+
+  IF (d==0) OR (d>(r3+r4)) OR (d<ABS(r3-r4)) THEN
+    RETURN {};
+  END;
+
+  aa := (r3^2 - r4^2 + d^2)/(2*d);
+  h2 := r3^2 - aa^2;
+
+  IF h2<0 THEN
+    RETURN {};
+  END;
+
+  h := SQRT(h2);
+
+  Px := Bx + aa*dx/d;
+  Py := By + aa*dy/d;
+
+  ux := -dy/d;
+  uy :=  dx/d;
+
+  C1x := Px + h*ux;
+  C1y := Py + h*uy;
+
+  C2x := Px - h*ux;
+  C2y := Py - h*uy;
+
+  th3_1 := ATAN2G1R(C1y-By, C1x-Bx);
+  th4_1 := ATAN2G1R(C1y-Dy, C1x-Dx);
+
+  th3_2 := ATAN2G1R(C2y-By, C2x-Bx);
+  th4_2 := ATAN2G1R(C2y-Dy, C2x-Dx);
+
+  th3_1 := WRAP2PI(th3_1);
+  th4_1 := WRAP2PI(th4_1);
+  th3_2 := WRAP2PI(th3_2);
+  th4_2 := WRAP2PI(th4_2);
+
+  RETURN {{th3_1,th4_1,C1x,C1y},{th3_2,th4_2,C2x,C2y}};
+END;
+
+
+// -------- Closure error --------
+FOURBAR_ERR(r1,r2,r3,r4,th2,th3,th4)
+BEGIN
+  LOCAL f1,f2;
+
+  f1 := r2*COSR(th2) + r3*COSR(th3) - r4*COSR(th4) - r1;
+  f2 := r2*SINR(th2) + r3*SINR(th3) - r4*SINR(th4);
+
+  RETURN SQRT(f1^2 + f2^2);
+END;
+
+
+// -------- Safe Newton refinement --------
+// Returns {th3, th4, it, err, ok}
+// ok = 1 means converged
+// ok = 0 means do not trust improvement
+FOURBAR_NR(r1,r2,r3,r4,th2,th3,th4)
+BEGIN
+  LOCAL TOL,maxit,it,err;
+  LOCAL f1,f2;
+  LOCAL a,b,c,d,detJ,dth3,dth4,lam;
+  LOCAL t3,t4,enew;
+
+  TOL := 1E-10;
+  maxit := 20;
+
+  err := FOURBAR_ERR(r1,r2,r3,r4,th2,th3,th4);
+  it := 0;
+
+  IF err<=TOL THEN
+    RETURN {th3,th4,it,err,1};
+  END;
+
+  WHILE (err>TOL) AND (it<maxit) DO
+    it := it + 1;
+
+    f1 := r2*COSR(th2) + r3*COSR(th3) - r4*COSR(th4) - r1;
+    f2 := r2*SINR(th2) + r3*SINR(th3) - r4*SINR(th4);
+
+    a := -r3*SINR(th3);
+    b :=  r4*SINR(th4);
+    c :=  r3*COSR(th3);
+    d := -r4*COSR(th4);
+
+    detJ := a*d - b*c;
+
+    IF ABS(detJ)<1E-12 THEN
+      RETURN {th3,th4,it,err,0};
+    END;
+
+    dth3 := -( d*f1 - b*f2 ) / detJ;
+    dth4 :=  ( c*f1 - a*f2 ) / detJ;
+
+    // step limiter
+    IF ABS(dth3)>0.10 THEN dth3 := SIGN(dth3)*0.10; END;
+    IF ABS(dth4)>0.10 THEN dth4 := SIGN(dth4)*0.10; END;
+
+    lam := 1;
+    enew := err;
+
+    REPEAT
+      t3 := WRAP2PI(th3 + lam*dth3);
+      t4 := WRAP2PI(th4 + lam*dth4);
+      enew := FOURBAR_ERR(r1,r2,r3,r4,th2,t3,t4);
+
+      IF enew < err THEN
+        th3 := t3;
+        th4 := t4;
+        err := enew;
+        BREAK;
+      END;
+
+      lam := lam/2;
+    UNTIL lam < 1E-4;
+
+    IF lam < 1E-4 THEN
+      RETURN {th3,th4,it,err,0};
+    END;
+  END;
+
+  IF err<=TOL THEN
+    RETURN {th3,th4,it,err,1};
+  END;
+
+  RETURN {th3,th4,it,err,0};
+END;
+
+
+// ========================================
+// VELOCITY ANALYSIS
+// ========================================
+FOURBAR_VEL(r2,r3,r4,th2,th3,th4,omega2)
+BEGIN
+  LOCAL a,b,c,d,detJ;
+  LOCAL RHS_x,RHS_y;
+  LOCAL omega3,omega4;
+
+  a := -r3*SINR(th3);
+  b :=  r4*SINR(th4);
+  c :=  r3*COSR(th3);
+  d := -r4*COSR(th4);
+
+  detJ := a*d - b*c;
+
+  IF ABS(detJ)<1E-12 THEN
+    RETURN {0,0};
+  END;
+
+  RHS_x :=  r2*SINR(th2)*omega2;
+  RHS_y := -r2*COSR(th2)*omega2;
+
+  omega3 := ( d*RHS_x - b*RHS_y ) / detJ;
+  omega4 := (-c*RHS_x + a*RHS_y ) / detJ;
+
+  RETURN {omega3,omega4};
+END;
+
+
+// ========================================
+// ACCELERATION ANALYSIS
+// ========================================
+FOURBAR_ACC(r2,r3,r4,th2,th3,th4,omega2,alpha2,omega3,omega4)
+BEGIN
+  LOCAL a,b,c,d,detJ;
+  LOCAL RHS_x,RHS_y;
+  LOCAL alpha3,alpha4;
+
+  a := -r3*SINR(th3);
+  b :=  r4*SINR(th4);
+  c :=  r3*COSR(th3);
+  d := -r4*COSR(th4);
+
+  detJ := a*d - b*c;
+
+  IF ABS(detJ)<1E-12 THEN
+    RETURN {0,0};
+  END;
+
+  RHS_x := r2*(SINR(th2)*alpha2 + COSR(th2)*omega2^2)
+           + r3*COSR(th3)*omega3^2
+           - r4*COSR(th4)*omega4^2;
+
+  RHS_y := -r2*(COSR(th2)*alpha2 - SINR(th2)*omega2^2)
+           + r3*SINR(th3)*omega3^2
+           - r4*SINR(th4)*omega4^2;
+
+  alpha3 := ( d*RHS_x - b*RHS_y ) / detJ;
+  alpha4 := (-c*RHS_x + a*RHS_y ) / detJ;
+
+  RETURN {alpha3,alpha4};
+END;
+
+
+// ========================================
+// MAIN PROGRAM
+// ========================================
+EXPORT FOURBAR()
+BEGIN
+  LOCAL r1,r2,r3,r4;
+  LOCAL th2_deg,th2;
+  LOCAL omega2,alpha2;
+  LOCAL sols,asm;
+  LOCAL th3,th4,th3_deg,th4_deg;
+  LOCAL err,err0,errN;
+  LOCAL choice,askLinks,mode;
+  LOCAL vel,acc,nr;
+  LOCAL omega3,omega4,alpha3,alpha4;
+  LOCAL doVel;
+  LOCAL refine,ok,it;
+  LOCAL th3_try,th4_try;
+
+  // Saved values in C,D,E,F
+  IF (C≠0) AND (D≠0) AND (E≠0) AND (F≠0) THEN
+    r1 := C;
+    r2 := D;
+    r3 := E;
+    r4 := F;
+  ELSE
+    r1 := 0;
+    r2 := 0;
+    r3 := 0;
+    r4 := 0;
+  END;
+
+  askLinks := 1;
+
+  REPEAT
+
+    // -------- LINK INPUT --------
+    IF askLinks==1 THEN
+      mode := 2;
+
+      IF (C≠0) AND (D≠0) AND (E≠0) AND (F≠0) THEN
+        CHOOSE(mode,"LINKS",
+          "USE SAVED LINKS",
+          "EDIT / ENTER NEW LINKS"
+        );
+        IF mode==0 THEN RETURN; END;
+        IF mode==1 THEN
+          r1 := C;
+          r2 := D;
+          r3 := E;
+          r4 := F;
+        END;
+      END;
+
+      IF (mode==2) OR NOT((C≠0) AND (D≠0) AND (E≠0) AND (F≠0)) THEN
+        REPEAT
+          IF NOT INPUT({r1,r2,r3,r4},"4-BAR LINK LENGTHS",
+            {"Fixed frame","Input link","Coupler","Output link"},
+            {"Ground link","Driving crank","Middle link","Output rocker"},
+            {r1,r2,r3,r4}) THEN
+            RETURN;
+          END;
+
+          IF (r1<=0) OR (r2<=0) OR (r3<=0) OR (r4<=0) THEN
+            MSGBOX("All link lengths must be > 0.");
+          END;
+        UNTIL (r1>0) AND (r2>0) AND (r3>0) AND (r4>0);
+
+        C := r1;
+        D := r2;
+        E := r3;
+        F := r4;
+      END;
+
+      askLinks := 0;
+    END;
+
+    // -------- INPUT CRANK ANGLE --------
+    th2_deg := 0;
+    IF NOT INPUT(th2_deg,"INPUT CRANK ANGLE",
+      {"th2 (deg)"},
+      {"Input crank angle"},
+      {th2_deg}) THEN
+      RETURN;
+    END;
+
+    th2 := th2_deg*π/180;
+
+    // -------- ANALYSIS TYPE --------
+    doVel := 1;
+    CHOOSE(doVel,"ANALYSIS TYPE",
+      "POSITION ONLY",
+      "POSITION + VELOCITY + ACCELERATION"
+    );
+    IF doVel==0 THEN RETURN; END;
+
+    omega2 := 0;
+    alpha2 := 0;
+
+    IF doVel==2 THEN
+      IF NOT INPUT({omega2,alpha2},"INPUT KINEMATICS",
+        {"omega2 (rad/s)","alpha2 (rad/s^2)"},
+        {"Input angular velocity","Input angular acceleration"},
+        {omega2,alpha2}) THEN
+        RETURN;
+      END;
+    END;
+
+    // -------- GEOMETRY SOLVE --------
+    sols := FOURBAR_GEOM(r1,r2,r3,r4,th2);
+
+    IF SIZE(sols)==0 THEN
+      MSGBOX("No real assembly at this angle.");
+      choice := 0;
+      CHOOSE(choice,"NEXT?",
+        "Same links, new th2",
+        "New links",
+        "Exit"
+      );
+
+      IF choice==0 THEN RETURN; END;
+      IF choice==1 THEN
+        askLinks := 0;
+      ELSE
+        IF choice==2 THEN
+          askLinks := 1;
+        ELSE
+          RETURN;
+        END;
+      END;
+
+    ELSE
+
+      // -------- CHOOSE ASSEMBLY --------
+      asm := 1;
+      CHOOSE(asm,"ASSEMBLY","OPEN","CROSSED");
+      IF asm==0 THEN RETURN; END;
+
+      th3 := sols(asm,1);
+      th4 := sols(asm,2);
+
+      err0 := FOURBAR_ERR(r1,r2,r3,r4,th2,th3,th4);
+      err  := err0;
+
+      // -------- OPTIONAL SAFE NEWTON --------
+      refine := 2;
+      CHOOSE(refine,"REFINE WITH NEWTON?",
+        "YES",
+        "NO"
+      );
+      IF refine==0 THEN RETURN; END;
+
+      ok := 0;
+      it := 0;
+      errN := err0;
+
+      IF refine==1 THEN
+        nr := FOURBAR_NR(r1,r2,r3,r4,th2,th3,th4);
+
+        th3_try := nr(1);
+        th4_try := nr(2);
+        it      := nr(3);
+        errN    := nr(4);
+        ok      := nr(5);
+
+        // only accept Newton if it improved the error
+        IF (ok==1) AND (errN < err0) THEN
+          th3 := th3_try;
+          th4 := th4_try;
+          err := errN;
+        ELSE
+          err := err0;
+        END;
+      END;
+
+      th3_deg := WRAPDEG(th3*180/π);
+      th4_deg := WRAPDEG(th4*180/π);
+
+      omega3 := 0;
+      omega4 := 0;
+      alpha3 := 0;
+      alpha4 := 0;
+
+      IF doVel==2 THEN
+        vel := FOURBAR_VEL(r2,r3,r4,th2,th3,th4,omega2);
+        omega3 := vel(1);
+        omega4 := vel(2);
+
+        acc := FOURBAR_ACC(r2,r3,r4,th2,th3,th4,omega2,alpha2,omega3,omega4);
+        alpha3 := acc(1);
+        alpha4 := acc(2);
+      END;
+
+      // -------- DISPLAY --------
+      RECT();
+      TEXTOUT_P("4-BAR LINKAGE SOLVER",40,5,2);
+
+      TEXTOUT_P("Fixed frame="+STRING(r1),10,25,1);
+      TEXTOUT_P("Input link="+STRING(r2),10,40,1);
+      TEXTOUT_P("Coupler="+STRING(r3),10,55,1);
+      TEXTOUT_P("Output link="+STRING(r4),10,70,1);
+
+      TEXTOUT_P("POSITION:",10,90,2);
+      TEXTOUT_P("th2 = "+STRING(ROUND(th2_deg,3))+"°",10,110,1);
+      TEXTOUT_P("th3 = "+STRING(ROUND(th3_deg,6))+"°",10,125,1);
+      TEXTOUT_P("th4 = "+STRING(ROUND(th4_deg,6))+"°",10,140,1);
+      TEXTOUT_P("Assembly: "+IFTE(asm==1,"OPEN","CROSSED"),10,155,1);
+
+      IF doVel==2 THEN
+        TEXTOUT_P("VELOCITY (rad/s):",10,175,2);
+        TEXTOUT_P("w2 = "+STRING(ROUND(omega2,6)),10,195,1);
+        TEXTOUT_P("w3 = "+STRING(ROUND(omega3,6)),10,210,1);
+        TEXTOUT_P("w4 = "+STRING(ROUND(omega4,6)),10,225,1);
+
+        TEXTOUT_P("ACCELERATION (rad/s²):",160,175,2);
+        TEXTOUT_P("a2 = "+STRING(ROUND(alpha2,6)),160,195,1);
+        TEXTOUT_P("a3 = "+STRING(ROUND(alpha3,6)),160,210,1);
+        TEXTOUT_P("a4 = "+STRING(ROUND(alpha4,6)),160,225,1);
+      END;
+
+      TEXTOUT_P("geom err = "+STRING(err0),10,240,1);
+
+      IF refine==1 THEN
+        IF (ok==1) AND (errN < err0) THEN
+          TEXTOUT_P("Newton accepted",160,240,1);
+        ELSE
+          TEXTOUT_P("Newton rejected",160,240,1);
+        END;
+      ELSE
+        TEXTOUT_P("Newton off",160,240,1);
+      END;
+
+      WAIT(0);
+
+      // -------- ANOTHER? --------
+      choice := 0;
+      CHOOSE(choice,"CALCULATE ANOTHER?",
+        "YES - Same links, new th2",
+        "YES - New links",
+        "NO - Exit"
+      );
+
+      IF choice==0 THEN RETURN; END;
+
+      IF choice==1 THEN
+        askLinks := 0;
+      ELSE
+        IF choice==2 THEN
+          askLinks := 1;
+        ELSE
+          RETURN;
+        END;
+      END;
+
+    END;
+
+  UNTIL 0;
+END;
